@@ -1,0 +1,122 @@
+from flask import Flask, request, send_file, render_template_string
+import pandas as pd
+import os
+from threading import Timer
+
+app = Flask(__name__)
+UPLOAD_FOLDER = 'uploads'
+
+# 업로드 폴더 생성
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
+
+# 파일 업로드 양식 템플릿
+upload_form = '''
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CSV to SRT</title>
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8f9fa;
+            margin: 0;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .container {
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            max-width: 600px;
+            width: 100%;
+        }
+        .btn-primary {
+            background-color: #007bff;
+            border: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container text-center">
+        <h1 class="mb-4">CSV to SRT Converter</h1>
+        <form method="post" enctype="multipart/form-data">
+            <div class="form-group">
+                <input type="file" name="file" class="form-control-file" required>
+            </div>
+            <button type="submit" class="btn btn-primary">업로드</button>
+        </form>
+    </div>
+</body>
+</html>
+'''
+
+
+# 루트 엔드포인트 - 파일 업로드 폼 제공
+@app.route('/')
+def upload_form_page():
+    return render_template_string(upload_form)
+
+
+# 파일 업로드 엔드포인트
+@app.route('/', methods=['POST'])
+def upload_file():
+    uploaded_file = request.files['file']
+    if uploaded_file.filename != '':
+        input_path = os.path.join(UPLOAD_FOLDER, uploaded_file.filename)
+        uploaded_file.save(input_path)
+
+        # CSV 파일을 읽고 처리
+        dtype_dict = {'Text': str}
+        input_df = pd.read_csv(input_path,
+                               usecols=[0, 1, 2],
+                               encoding='utf-8',
+                               dtype=dtype_dict,
+                               index_col=False)
+        input_df['Text'] = input_df['Text'].fillna('').str.replace('\r', ' ')
+        input_df = input_df.groupby('Start Time').agg({
+            'Start Time': 'first',
+            'End Time': 'first',
+            'Text': ' / '.join
+        }).reset_index(drop=True)
+        input_df['Text'] = input_df['Text'].str.replace('\n', '')
+        input_df['Start Time'] = input_df['Start Time'].str.replace(
+            ';', ':').str.rsplit(
+                ':', n=1).apply(lambda x: f"{x[0]},{int(x[1]) * 33:03d}")
+        input_df['End Time'] = input_df['End Time'].str.replace(
+            ';', ':').str.rsplit(
+                ':', n=1).apply(lambda x: f"{x[0]},{int(x[1]) * 33:03d}")
+        input_df['index'] = range(1, len(input_df) + 1)
+
+        def csvtosrt(row):
+            return f"{row['index']}\n{row['Start Time']} --> {row['End Time']}\n{row['Text']}\n\n"
+
+        srt_file = ''.join(input_df.apply(csvtosrt, axis=1))
+        output_path = os.path.join(
+            UPLOAD_FOLDER,
+            uploaded_file.filename.rsplit('.', 1)[0] + '.srt')
+
+        with open(output_path, 'w', encoding='utf-8') as file:
+            file.write(srt_file)
+
+        # 파일 삭제 타이머 시작
+        Timer(60, delete_file, [output_path]).start()
+
+        return send_file(output_path, as_attachment=True)
+    return 'No file uploaded'
+
+
+# 파일 삭제 함수
+def delete_file(path):
+    if os.path.exists(path):
+        os.remove(path)
+        print(f"Deleted file: {path}")
+
+
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=8080)
